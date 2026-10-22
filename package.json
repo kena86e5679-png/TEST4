@@ -1,0 +1,13 @@
+{
+  "name": "ar-spatial-multiplayer",
+  "version": "3.0.0",
+  "description": "空間偏好 AR：多人連機、Canny邊緣標記定位與敵人遮擋系統",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.17.0"
+  }
+}

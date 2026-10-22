@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AR 伺服器端：即時空間標記地圖與玩家定位監控</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+  body { margin: 0; background: #0d0f12; color: #eee; font-family: ui-monospace, Menlo, monospace; display: flex; height: 100vh; overflow: hidden; }
+  #sidebar { width: 330px; background: #15181e; border-right: 1px solid #2a2e39; padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+  h2 { font-size: 14px; margin: 8px 0 4px; color: #6effe1; letter-spacing: 0.05em; }
+  .room-bar { display: flex; gap: 6px; }
+  .room-bar input { flex: 1; background: #0d0f12; border: 1px solid #2a2e39; color: #fff; padding: 6px 10px; border-radius: 6px; font-family: inherit; }
+  .room-bar button { background: #6effe1; color: #000; border: 0; padding: 6px 12px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+  .card { background: #1e222b; padding: 10px 12px; border-radius: 8px; margin-bottom: 8px; font-size: 12px; line-height: 1.6; }
+  .active-tag { color: #6effe1; font-weight: bold; }
+  .inactive-tag { color: #888; }
+  #status { font-size: 12px; color: #ffb86c; }
+  #map { flex: 1; display: block; }
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <div>
+    <h2>房間頻道連線設定</h2>
+    <div class="room-bar">
+      <input id="roomInput" type="text" value="AR-ROOM-1" placeholder="輸入房號">
+      <button id="btnConnect">連線</button>
+    </div>
+    <div id="status" style="margin-top:6px;">狀態：初始化連線中...</div>
+  </div>
+  <div>
+    <h2>連線玩家座標 (Players)</h2>
+    <div id="playerList">尚無玩家連線</div>
+  </div>
+  <div>
+    <h2>空間標記物座標 (Markers A-1, A-2...)</h2>
+    <div id="markerList">尚無標記物</div>
+  </div>
+</div>
+<canvas id="map"></canvas>
+
+<script>
+const cv = document.getElementById('map');
+const ctx = cv.getContext('2d');
+const statusEl = document.getElementById('status');
+let players = {}, markers = {}, walls = [];
+let peer = null, ws = null;
+
+function resize() { cv.width = cv.clientWidth; cv.height = cv.clientHeight; }
+window.addEventListener('resize', resize);
+resize();
+
+function handleMsg(msg) {
+  if (msg.type === 'init') {
+    players = msg.players || {};
+    if (msg.id) delete players[msg.id];
+    markers = msg.markers || {};
+    walls = msg.walls || [];
+  } else if (msg.type === 'playerJoined' || msg.type === 'playerMove') {
+    players[msg.player.id] = msg.player;
+  } else if (msg.type === 'playerLeft') {
+    delete players[msg.id];
+  } else if (msg.type === 'markerSpawned' || msg.type === 'markerActivated') {
+    markers[msg.marker.id] = msg.marker;
+    if (msg.walls) walls = msg.walls;
+  }
+  updateSidebar();
+}
+
+function connectRoom() {
+  const room = document.getElementById('roomInput').value.trim() || 'AR-ROOM-1';
+  if (ws) { try { ws.close(); } catch (e) {} }
+  if (peer) { try { peer.destroy(); } catch (e) {} }
+
+  if (!location.hostname.endsWith('github.io')) {
+    try {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${location.host}`);
+      ws.onopen = () => { statusEl.textContent = '狀態：已連接 Node.js WebSocket 伺服器'; statusEl.style.color = '#6effe1'; };
+      ws.onmessage = (ev) => handleMsg(JSON.parse(ev.data));
+      ws.onerror = () => connectPeerJS(room);
+      return;
+    } catch (e) {}
+  }
+  connectPeerJS(room);
+}
+
+function connectPeerJS(room) {
+  statusEl.textContent = `狀態：正在透過雲端連入頻道 [${room}]...`;
+  const cleanRoom = room.replace(/[^a-zA-Z0-9_-]/g, '');
+  const hostId = `ar-vision-room-${cleanRoom}-host`;
+  peer = new Peer();
+  peer.on('open', () => {
+    const conn = peer.connect(hostId);
+    conn.on('open', () => {
+      statusEl.textContent = `狀態：已連入雲端房間 [${room}] 即時監控中`;
+      statusEl.style.color = '#6effe1';
+    });
+    conn.on('data', (data) => handleMsg(data));
+    conn.on('close', () => { statusEl.textContent = '狀態：與房間主持端斷線'; statusEl.style.color = '#ff6a5a'; });
+  });
+}
+
+document.getElementById('btnConnect').addEventListener('click', connectRoom);
+connectRoom();
+
+function updateSidebar() {
+  const pEl = document.getElementById('playerList');
+  const pArr = Object.values(players);
+  pEl.innerHTML = pArr.length ? pArr.map(p => `
+    <div class="card">
+      <b>ID: ${p.id}</b><br>
+      座標: (${Number(p.x || 0).toFixed(2)}m, ${Number(p.z || 0).toFixed(2)}m)<br>
+      速度: ${Number(p.speed || 0).toFixed(2)} m/s
+    </div>
+  `).join('') : '<div class="card">等待手機端玩家進入...</div>';
+
+  const mEl = document.getElementById('markerList');
+  const mArr = Object.values(markers);
+  mEl.innerHTML = mArr.length ? mArr.map(m => `
+    <div class="card">
+      <b>[${m.id}]</b> <span class="${m.active ? 'active-tag' : 'inactive-tag'}">${m.active ? '● 已激活定位' : '○ 待靠近激活'}</span><br>
+      位置: (${Number(m.x || 0).toFixed(2)}m, ${Number(m.z || 0).toFixed(2)}m)
+    </div>
+  `).join('') : '<div class="card">掃描環境邊緣中...</div>';
+}
+
+function render() {
+  requestAnimationFrame(render);
+  const W = cv.width, H = cv.height;
+  const cx = W / 2, cy = H / 2, scale = 32;
+
+  ctx.fillStyle = '#0d0f12';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.strokeStyle = '#1b1f27';
+  ctx.lineWidth = 1;
+  for (let x = cx % scale; x < W; x += scale) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = cy % scale; y < H; y += scale) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+  ctx.strokeStyle = 'rgba(110, 255, 225, 0.45)';
+  ctx.lineWidth = 3;
+  walls.forEach(w => {
+    ctx.beginPath();
+    ctx.moveTo(cx + w.x1 * scale, cy + w.z1 * scale);
+    ctx.lineTo(cx + w.x2 * scale, cy + w.z2 * scale);
+    ctx.stroke();
+  });
+
+  Object.values(markers).forEach(m => {
+    const sx = cx + m.x * scale, sy = cy + m.z * scale;
+    ctx.strokeStyle = m.active ? '#6effe1' : '#777';
+    ctx.fillStyle = m.active ? 'rgba(110,255,225,0.2)' : 'transparent';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(sx - 7, sy - 7, 14, 14);
+    ctx.fillRect(sx - 7, sy - 7, 14, 14);
+    ctx.fillStyle = m.active ? '#6effe1' : '#999';
+    ctx.font = '12px monospace';
+    ctx.fillText(m.id, sx + 10, sy + 4);
+  });
+
+  Object.values(players).forEach(p => {
+    const sx = cx + p.x * scale, sy = cy + p.z * scale;
+    ctx.fillStyle = '#ff5252';
+    ctx.beginPath(); ctx.arc(sx, sy, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#ff5252';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(sx + Math.sin(p.yaw || 0) * 20, sy - Math.cos(p.yaw || 0) * 20);
+    ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.fillText(p.id, sx - 14, sy - 10);
+  });
+}
+render();
+</script>
+</body>
+</html>
